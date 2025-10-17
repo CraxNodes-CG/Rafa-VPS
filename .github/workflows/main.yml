@@ -29,7 +29,7 @@ jobs:
           if [ -n "$LATEST_BACKUP" ]; then
               echo "✅ Restoring folder backup $LATEST_BACKUP ..."
               sudo rsync -a --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp --exclude=/run --exclude=/mnt --exclude=/media \
-                   /var /etc /usr $GITHUB_WORKSPACE/$LATEST_BACKUP/
+                   "$GITHUB_WORKSPACE/vps_restore/$LATEST_BACKUP/" /
               echo "✅ Backup restored."
           else
               echo "⚠️ No backup found. Starting fresh VPS."
@@ -55,20 +55,24 @@ jobs:
 
           nohup bash -c "while true; do
               TIMESTAMP=\$(date '+%Y%m%d_%H%M%S')
-              BACKUP_DIR=\"vps_backups/backup_\$TIMESTAMP\"
+              BACKUP_DIR=\"$GITHUB_WORKSPACE/vps_backups/backup_\$TIMESTAMP\"
+              mkdir -p \$BACKUP_DIR
 
               echo \"📦 Creating backup folder \$BACKUP_DIR ...\"
-              sudo mkdir -p \$BACKUP_DIR
 
-              # Backup critical folders + repo
+              # Backup critical folders with sudo, then copy to backup dir
               sudo rsync -a --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp --exclude=/run --exclude=/mnt --exclude=/media \
-                   /var /etc /usr $GITHUB_WORKSPACE/ \$BACKUP_DIR/
+                   /var /etc /usr \$BACKUP_DIR/
+              rsync -a $GITHUB_WORKSPACE/ \$BACKUP_DIR/
+
+              # Fix ownership so Git can push
+              sudo chown -R runner:runner \$BACKUP_DIR
 
               FILE_COUNT=\$(find \$BACKUP_DIR -type f | wc -l)
               echo \"✅ Backup created: \$BACKUP_DIR, files: \$FILE_COUNT\"
 
               # Delete old backups
-              OLDS=\$(ls -1tr vps_backups/backup_* 2>/dev/null | head -n -1)
+              OLDS=\$(ls -1tr $GITHUB_WORKSPACE/vps_backups/backup_* 2>/dev/null | head -n -1)
               if [ -n \"\$OLDS\" ]; then
                   echo \"🗑️ Deleting old backups:\"
                   echo \$OLDS
@@ -76,8 +80,8 @@ jobs:
               fi
 
               # Git push latest backup
-              cd vps_backups
-              if [ ! -d ".git" ]; then
+              cd $GITHUB_WORKSPACE/vps_backups
+              if [ ! -d \".git\" ]; then
                   git init -q
                   git config user.email 'actions@github.com'
                   git config user.name 'github-actions'
