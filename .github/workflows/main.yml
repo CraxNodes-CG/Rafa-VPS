@@ -1,0 +1,121 @@
+name: VPS Critical Backup & SSHX
+
+on:
+  workflow_dispatch:
+
+jobs:
+  vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 335
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Restore latest backup
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          echo "🔁 Restoring latest backup..."
+          cd $GITHUB_WORKSPACE
+          mkdir -p vps_restore
+          cd vps_restore
+          git clone --branch vps-backups https://$PAT_TOKEN@github.com/${{ github.repository }} . || echo "⚠️ No backup branch found."
+
+          LATEST_BACKUP=$(ls -1tr backup_* 2>/dev/null | tail -n 1)
+          if [ -n "$LATEST_BACKUP" ]; then
+              echo "✅ Restoring folder backup $LATEST_BACKUP ..."
+              sudo rsync -a --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp --exclude=/run --exclude=/mnt --exclude=/media \
+                   /var /etc /usr $GITHUB_WORKSPACE/$LATEST_BACKUP/
+              echo "✅ Backup restored."
+          else
+              echo "⚠️ No backup found. Starting fresh VPS."
+          fi
+
+      - name: Start SSHX
+        run: |
+          echo "⚙️ Starting SSHX..."
+          cd $GITHUB_WORKSPACE
+          nohup bash -c "curl -sSf https://sshx.io/get | sh -s run > sshx_link.txt 2>&1" &
+          sleep 10
+          echo "🌐 SSHX Link:"
+          grep -Eo 'https://sshx.io/[^ ]+' sshx_link.txt || echo "❌ SSHX link not found"
+
+      - name: Start 2-Minute Folder Backup Loop
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          echo "💾 Starting 2-min backup loop for /var /etc /usr + repo..."
+          cd $GITHUB_WORKSPACE
+          mkdir -p vps_backups
+          LOG_FILE="vps_backups/vps_backup.log"
+
+          nohup bash -c "while true; do
+              TIMESTAMP=\$(date '+%Y%m%d_%H%M%S')
+              BACKUP_DIR=\"vps_backups/backup_\$TIMESTAMP\"
+
+              echo \"📦 Creating backup folder \$BACKUP_DIR ...\"
+              sudo mkdir -p \$BACKUP_DIR
+
+              # Backup critical folders + repo
+              sudo rsync -a --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/tmp --exclude=/run --exclude=/mnt --exclude=/media \
+                   /var /etc /usr $GITHUB_WORKSPACE/ \$BACKUP_DIR/
+
+              FILE_COUNT=\$(find \$BACKUP_DIR -type f | wc -l)
+              echo \"✅ Backup created: \$BACKUP_DIR, files: \$FILE_COUNT\"
+
+              # Delete old backups
+              OLDS=\$(ls -1tr vps_backups/backup_* 2>/dev/null | head -n -1)
+              if [ -n \"\$OLDS\" ]; then
+                  echo \"🗑️ Deleting old backups:\"
+                  echo \$OLDS
+                  rm -rf \$OLDS
+              fi
+
+              # Git push latest backup
+              cd vps_backups
+              if [ ! -d ".git" ]; then
+                  git init -q
+                  git config user.email 'actions@github.com'
+                  git config user.name 'github-actions'
+              fi
+              git add --all
+              git commit -m \"💾 VPS folder backup \$TIMESTAMP\" -q || true
+              git branch -M vps-backups
+              git remote remove origin 2>/dev/null || true
+              git remote add origin https://\$PAT_TOKEN@github.com/${{ github.repository }}.git
+              if git push -f origin vps-backups >/dev/null 2>&1; then
+                  echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] Backup \$BACKUP_DIR pushed successfully, files: \$FILE_COUNT\" >> \$LOG_FILE
+                  echo \"✅ Backup pushed to GitHub.\"
+              else
+                  echo \"[\$(date '+%Y-%m-%d %H:%M:%S')] Backup \$BACKUP_DIR push FAILED, files: \$FILE_COUNT\" >> \$LOG_FILE
+                  echo \"❌ Backup push FAILED!\"
+              fi
+              cd ..
+
+              sleep 120
+          done" &
+          echo "✅ Backup loop running in background."
+
+      - name: Keep VPS alive
+        run: |
+          echo "⏳ VPS running for 5h30..."
+          sleep 19800
+
+      - name: Auto Restart
+        if: always()
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          WORKFLOW_FILE: main.yml
+          RESTART_REF: main
+        run: |
+          echo "♻️ Triggering automatic restart..."
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $PAT_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$WORKFLOW_FILE/dispatches" \
+            -d "{\"ref\":\"$RESTART_REF\"}"
+          echo "✅ Restart request sent!"
